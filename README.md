@@ -51,6 +51,39 @@ This repository contains **both** the 1‑minute scalping engine and the 2–3h 
 
 ---
 
+## 🧭 Core Filters & Rules (Important)
+
+These filters apply **after** a strategy fires. A signal must pass all of them to trade.
+
+### 1) **Confidence Threshold**
+Only signals with confidence ≥ threshold are allowed.
+
+### 2) **Confirmation (optional)**
+If enabled, the previous candle must show the **same signal direction** and also meet confidence.
+
+### 3) **Trend EMA Alignment**
+- **LONG** only if `price > EMA_fast > EMA_slow`  
+- **SHORT** only if `price < EMA_fast < EMA_slow`
+
+### 4) **Regime Filter**
+If trend strength is too weak, **trend strategies are blocked** (reversion/structural can still trade).
+
+### 5) **Cooldowns**
+After a signal/trade, the pair is blocked for a cooldown period:
+- 1m scalps (default ~450s)
+- 2–3h strategies (default ~1200s)
+
+### 6) **Category Cap**
+Limits number of open trades per category (trend / reversion / structural). Prevents over‑exposure.
+
+### 7) **Risk/Reward Guard**
+Trades must meet minimum RR (e.g., ≥1.3) after fees/TP/SL adjustments.
+
+### 8) **Funding Filter**
+If funding is too high in the wrong direction, trades are blocked.
+
+---
+
 ## ⚙️ Execution
 
 ### Run the live trading loop:
@@ -67,6 +100,19 @@ cd /opt/multi-strat-engine
 
 ---
 
+## 🔧 Key Specifications (Current Defaults)
+
+- **Max concurrent trades:** 8 (split 4 × 1m + 4 × 2–3h)
+- **Confidence threshold (1m):** 0.66
+- **Confidence threshold (2–3h):** 0.63
+- **Min volatility:** 0.20%
+- **Min risk‑reward:** 1.3
+- **TP multiplier:** 1.20
+- **Min TP:** 0.18%
+- **Leverage cap:** 12
+
+---
+
 ## 📊 Reports
 
 Scripts in `multi-strat-engine/reports/` generate:
@@ -74,13 +120,13 @@ Scripts in `multi-strat-engine/reports/` generate:
 - Pair performance
 - Pipeline health
 - Heatmaps
-- TP/SL sanity checks
+- TP/SL checks
 
 > These produce CSVs which are **excluded** from git.
 
 ---
 
-## 🔐 Secrets & Logs
+## 🔐 Secrets & Logs (Excluded)
 
 Not committed (kept local only):
 - `user_data/config*.json` (API keys)
@@ -98,14 +144,6 @@ Each trade is logged with **strategy name**, **side**, and **PnL**, so you can c
 - whether it’s profitable or losing
 
 The trade‑to‑strategy mapping is done via `trade_events.csv` + `post_trade_pipeline.py`.
-
----
-
-## ✅ Notes
-
-- This repo reflects the **current live engine** for both 1m and 2–3h systems.
-- Adjust strategy filters in `strategies.py` and `new_strategies_2h.py`.
-- Trading is controlled by `trade_loop.py` (systemd service can be used).
 
 ---
 
