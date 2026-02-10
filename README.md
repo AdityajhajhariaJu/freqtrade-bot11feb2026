@@ -181,6 +181,17 @@ Not committed (kept local only):
 
 ---
 
+
+## 🔁 Persistent Strategy Mapping (New)
+
+The bot now **persists strategy→trade mapping across restarts** so you never lose attribution.
+
+- Metadata stored in: `multi-strat-engine/reports/position_meta.json`
+- On restart, open positions are logged with `ENTRY_RECOVER` in `trade_events.csv`
+- Each entry records **strategy_id, strategy_name, and engine (1m/2h)**
+
+This ensures every trade can be traced to the strategy that opened it.
+
 ## 🔄 Strategy Tracking
 
 Each trade is logged with **strategy name**, **side**, and **PnL**, so you can compare:
