@@ -45,6 +45,28 @@ MAX_AGE.update(NEW_MAX_AGE)
 
 # In-memory tracker: pair -> {strategy_id, opened_at}
 position_meta = {}
+META_PATH = "/opt/multi-strat-engine/reports/position_meta.json"
+
+
+def load_position_meta():
+    import json
+    from pathlib import Path
+    p = Path(META_PATH)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def save_position_meta():
+    import json
+    from pathlib import Path
+    try:
+        Path(META_PATH).write_text(json.dumps(position_meta))
+    except Exception:
+        pass
 _LAST_SWAP_TS = 0
 
 
@@ -65,16 +87,29 @@ def log_filtered(sig, reason):
 
 def normalize_pair(p):
     return (p or '').replace('/USDT:USDT','').replace('/USDT','').replace('USDT','USDT')
-def log_event(event, pair, side, qty=None, price=None, strategy_id="", strategy_name="", pnl=None, note=""):
+def log_event(event, pair, side, qty=None, price=None, strategy_id="", strategy_name="", pnl=None, note="", engine=""):
     from pathlib import Path
     import csv, time
     fpath = Path('/opt/multi-strat-engine/trade_events.csv')
     exists = fpath.exists()
+    header = None
+    if exists:
+        try:
+            with fpath.open() as f:
+                header = f.readline().strip().split(',')
+        except Exception:
+            header = None
     with fpath.open('a', newline='') as f:
         w=csv.writer(f)
-        if not exists:
-            w.writerow(["ts","event","pair","side","qty","price","strategy_id","strategy_name","pnl","note"])
-        w.writerow([int(time.time()), event, normalize_pair(pair), side, qty or "", price or "", strategy_id, strategy_name, pnl or "", note])
+        if not exists or not header or header[:2] != ["ts","event"]:
+            w.writerow(["ts","event","pair","side","qty","price","strategy_id","strategy_name","pnl","note","engine"])
+            header = ["ts","event","pair","side","qty","price","strategy_id","strategy_name","pnl","note","engine"]
+        # if old header (no engine), append engine into note
+        if "engine" not in header:
+            note = (note + f" | engine={engine}").strip()
+            w.writerow([int(time.time()), event, normalize_pair(pair), side, qty or "", price or "", strategy_id, strategy_name, pnl or "", note])
+        else:
+            w.writerow([int(time.time()), event, normalize_pair(pair), side, qty or "", price or "", strategy_id, strategy_name, pnl or "", note, engine])
 
 def load_keys():
     with open(CONFIG_PATH, "r") as f:
@@ -115,12 +150,31 @@ async def fetch_positions(exchange):
 
 
 async def seed_position_meta(exchange):
+    # load persisted meta first
+    position_meta.update(load_position_meta() or {})
     try:
         positions = await exchange.fetch_positions()
     except Exception as e:
         print(f"Seed positions error: {e}")
         return
     now = time.time()
+
+    def has_entry(pair):
+        from pathlib import Path
+        import csv
+        fpath = Path('/opt/multi-strat-engine/trade_events.csv')
+        if not fpath.exists():
+            return False
+        try:
+            with fpath.open() as f:
+                r=csv.DictReader(f)
+                for row in r:
+                    if row.get('event') in ('ENTRY','ENTRY_RECOVER') and row.get('pair') == normalize_pair(pair):
+                        return True
+        except Exception:
+            return False
+        return False
+
     for p in positions:
         amt = float(p.get('contracts') or p.get('contractSize') or 0)
         if amt == 0:
@@ -131,6 +185,12 @@ async def seed_position_meta(exchange):
         if pair not in position_meta:
             position_meta[pair] = {"strategy_id": "", "opened_at": opened_at}
             print(f"Seeded meta for {pair} opened_at={opened_at}")
+        # ensure entry is mapped even after restart
+        if not has_entry(pair):
+            sid = position_meta.get(pair, {}).get('strategy_id','')
+            eng = "2h" if sid and sid in STRAT_CONFIG.get('strategy_categories', {}).get('trend_2h', []) else "1m"
+            log_event("ENTRY_RECOVER", pair, "", qty=amt, price=None, strategy_id=sid, strategy_name="", note="Recovered open position", engine=eng)
+    save_position_meta()
 
 
 async def set_oneway(exchange):
@@ -180,7 +240,9 @@ async def place_orders(exchange, signal):
     except Exception as e:
         print(f"SL error {signal.pair}: {e}")
     position_meta[signal.pair] = {"strategy_id": signal.strategy_id, "opened_at": time.time(), "confidence": signal.confidence}
-    log_event("ENTRY", signal.pair, signal.side, qty=amount, price=signal.entry_price, strategy_id=signal.strategy_id, strategy_name=signal.strategy_name, note=signal.reason)
+    save_position_meta()
+    engine = "2h" if signal.strategy_id in STRAT_CONFIG.get("strategy_categories", {}).get("trend_2h", []) or signal.strategy_id in STRAT_CONFIG.get("strategy_categories", {}).get("reversion_2h", []) or signal.strategy_id in STRAT_CONFIG.get("strategy_categories", {}).get("structural_2h", []) else "1m"
+    log_event("ENTRY", signal.pair, signal.side, qty=amount, price=signal.entry_price, strategy_id=signal.strategy_id, strategy_name=signal.strategy_name, note=signal.reason, engine=engine)
     print(f"EXECUTED {signal.pair} {signal.side} size=${signal.trade_size:.2f} lev={signal.leverage} entry~{signal.entry_price} tp={signal.tp_price} sl={signal.sl_price} strat={signal.strategy_name} reason={signal.reason}")
 
 
@@ -253,6 +315,7 @@ async def loop():
                         side = 'LONG' if str(side_field).lower() == 'long' else 'SHORT'
                         await close_position(exchange, pair, side, amt)
                         position_meta.pop(pair, None)
+                        save_position_meta()
                 # apply post-close cooldowns for pairs that closed via TP/SL
                 post_close = STRAT_CONFIG.get("correlation", {}).get("post_close_cooldown_sec", 0)
                 cooldown = STRAT_CONFIG.get("correlation", {}).get("cooldown_sec", 0)
@@ -262,6 +325,7 @@ async def loop():
                         ts = time.time() + extra if extra else time.time()
                         set_pair_cooldown(pair, ts)
                         position_meta.pop(pair, None)
+                        save_position_meta()
                         print(f"Post-close cooldown set for {pair} ({post_close}s)")
             except Exception as e:
                 print(f"Age check error: {e}")
